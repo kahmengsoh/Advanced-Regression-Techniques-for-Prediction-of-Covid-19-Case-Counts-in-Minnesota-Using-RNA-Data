@@ -1,0 +1,617 @@
+---
+title: "Advanced Regression Techniques for Prediction of Covid-19 Case Counts in Minnesota
+  Using RNA Data"
+author: |
+  | Kah Meng Soh
+  | University of Minnesota - Twin Cities
+output:
+  pdf_document: default
+  bookdown::pdf_document2:
+    citation_package: natbib
+    fig_caption: true
+    number_sections: true
+header-includes:
+- \usepackage{setspace} \onehalfspacing
+- \usepackage{threeparttable}
+bibliography: "references.bib"
+biblio-style: apalike
+fontsize: 12pt
+geometry: margin=1in
+abstract: " This study builds on the initial research, 'Wastewater Surveillance of SARS-CoV-2 in Minnesota [@Mark2024Surveillance],' which applied various linear regression models to individual wastewater treatment plants. By aggregating data from all plants across Minnesota, this research aims to improve the predictive accuracy of COVID-19 case counts. We employed advanced statistical methods, including interaction effects, regularization, and Generalized Additive Models (GAMs), along with machine learning techniques such as Decision Trees, K-Nearest Neighbors, and Gradient Boosting Machines (GBM). Model diagnostics also performed on the best linear model to check if linear model assumption are met. 
+
+The study evaluates the effectiveness of normalization versus interaction effects and examines the impact of using lagged data (lag 1 and lag 2) on model performance. The results indicate that K-Nearest Neighbors (KNN) with k=9 outperforms other models, achieving the lowest prediction error. Additionally, the research finds that excluding PMMoV improves model performance, interaction effects are preferable to normalization, and using only the most recent data (lag 1) is sufficient compared to incorporating both lag 1 and lag 2."
+---
+```{r setup, echo=FALSE, cache=FALSE, message=FALSE}
+library(ggplot2) # For Variable Importance Plot
+library(caret) # For Classifer and Regressor
+library(tidyverse) # To structure dataframe
+library(kableExtra) # For table in Rmd
+library(knitr) # For knit
+library(glmnet) # For Ridge
+suppressWarnings(library(mgcv)) # For GAM
+library(dplyr) # To structure dataframe
+library(gbm) # For GBM unused
+set.seed(950826) # For reproducibility
+
+# Read the dataset
+df <- read.csv('C:/Users/micke/OneDrive/Desktop/KingYiuData.csv')
+
+theme_set(theme_bw())
+opts_chunk$set(
+  echo = FALSE,
+  prompt = FALSE, 
+  comment = NA, 
+  message = FALSE, 
+  warning = FALSE,
+  fig.align = "center"
+)
+```
+# Background
+Coronavirus disease 2019 (COVID-19), caused by severe acute respiratory syndrome coronavirus 2 (SARS-CoV-2), has infected millions of people worldwide, resulting in significant health and economic impacts. Consequently, methods for detecting, tracking, and sampling this infectious disease at the community level are urgently needed. Mass community testing is costly, and the demand for tests frequently exceeds the capacity of testing facilities [@barasa2020assessing]. Additionally, not everyone has access to testing due to economic, geographic, or social restrictions. Test results are also a lagging indicator of the pandemic’s progression because testing is usually prompted by symptoms, which may take up to two weeks to appear after infection [@lauer2020incubation]. Thus, delays may occur between the appearance of symptoms, testing, and the reporting of test results [@peccia2020measurement]. It is estimated that as many as 45% of COVID-19 cases are asymptomatic [@li2020substantial; @nishiura2020estimation; @oran2020prevalence; @post2020dynamic]. Considering that people only seek medical attention and undergo diagnostic testing if they are symptomatic, the number of confirmed clinical cases may grossly underestimate the prevalence of the disease. 
+
+Wastewater-based epidemiology (WBE) is an emerging method of monitoring trends of the virus in communities. In WBE, wastewater is sampled from wastewater treatment plants (WWTPs) and tested for signatures of viruses excreted via feces. The presence of viruses in wastewater samples informs the potential of viral outbreaks in the communities served by those plants. WBE has been successfully employed as a surveillance tool for diseases such as SARS, hepatitis A, and polio [@hellmer2014detection; @manor1999detection; @ye2016survivability]. Regarding SARS-CoV-2, viral particles are reported to be shed in feces from infected individuals even if they are asymptomatic [@chan2021systematic; @chen2020presence; @cheung2020gastrointestinal; @parasa2020prevalence; @wong2020detection]. Recent studies have shown that WBE is able to predict COVID-19 prevalence even earlier than clinical case data [@peccia2020measurement; @ahmed2020first; @arora2020sewage; @randazzo2020sars], supporting the idea that WBE can be used as an early warning system to identify disease hotspots.
+
+Estimating the SARS-CoV-2 RNA concentrations in wastewater (gene copies per litre) is complicated, as the dilution and fecal strength in the wastewater may vary between sampling dates. It has been recommended to multiply the viral concentration in wastewater by the flow of the sampled location (the volume of wastewater that passed through the location in a day) to obtain the viral concentrations in gene copies per day and account for changes in sanitary sewer contributions [@hasan2021detection; @weidhaas2021correlation]. However, the flow rate is not stable and is impacted by many factors such as rainstorms. Normalizing SARS-CoV-2 RNA concentrations by indicators of human fecal waste is also common because feces in wastewater can have variable levels of SARS-CoV-2 depending upon the amount of water used per toilet flush or body washing [@zhan2022relationships]. The contribution of SARS-CoV-2 from human-sourced water can then be estimated by dividing the measured SARS-CoV-2 concentration by the concentration of the human waste indicator [@zhan2022relationships]. A typically examined fecal marker is Pepper Mild Mottle Virus (PMMoV) [@maal2023does; @zhan2022relationships]. Previous studies have shown that PMMoV is the most abundant RNA virus in human feces and is shed in large quantities in wastewater [@hamza2019pepper; @kitajima2014relative; @kitajima2018pepper; @rosario2009pepper; @zhang2006rna]. It is also highly stable in wastewater, and its concentrations show little seasonal variation [@kitajima2014relative; @kitajima2018pepper].
+
+The main objective of this study is to develop predictive models to estimate the number of COVID-19 cases using wastewater samples from 40 WWTPs in Minnesota, USA, from March 2022 to October 2022. In particular, this study attempts to answer the following research questions:
+
+1. Should the SARS-CoV-2 concentrations be normalized using Flow, PMMoV, or the interaction between them?
+2. Is linear model assumption satisfied?
+3. How do linear model compare to machine learning models in predicting outcomes?
+4. Should the model incorporate only the lagged 1 data, or should both lagged 1 and lagged 2 data be included?
+
+# Data Description
+Wastewater samples were collected from 40 wastewater treatment plants (WWTPs) across 191 zip codes in Minnesota, covering approximately 67% of the state’s population, from March 2022 to October 2022. Samples were taken twice weekly, and the concentrations of SARS-CoV-2 target genes, specifically Nucleocapsid (N), were measured as gene copies per liter. Weekly averages were used for data since two samples were collected weekly. Data inclusion was limited to non-overlapping weeks, and missing values were excluded. Each weekly dataset also included measurements of the human fecal marker (PMMoV) and influent flow rate (Flow) provided by the participating WWTPs.
+
+Weekly new infection counts (CaseCount) for each WWTP service area were obtained from Minnesota’s public health records. To ensure consistent data scaling, CaseCount and Nucleocapsid (N) were divided by the population size of each respective WWTP service area, resulting in CaseCount being expressed as the percentage of the population infected with COVID-19. Observations with missing values due to the creation of lagged variables were removed. The final dataset comprises 930 weeekly samples data. Previous studies determined that applying a $\log_{10}$ transformation to both the dependent and independent variables enhances model performance, so this transformation will be maintained in our analysis.
+
+**Plot 1** is a scatterplot displaying Weekly New Infection Counts (CaseCount) versus Nucleocapsid (N). To improve visibility, extreme outlier values have been removed. The data is shown on the original scale, without a log transformation, as the log transformation is monotonic in nature to the original scale. The plot reveals no obvious linear trend, as many data points cluster around lower values of CaseCount and Nucleocapsid. This suggests that a nonlinear model might better fit the data. We will perform linear model diagnostics and explore nonlinear modeling to further investigate this possibility.
+```{r}
+filtered_df <- df[df$N_Lag1 >= 0.01 & df$N_Lag1 <= 10, ]
+
+# Plotting with smaller font size
+par(cex.lab=0.8, cex.axis=0.8, cex.main=0.8)
+plot(filtered_df$CaseCount, filtered_df$N_Lag1, type="p", col="blue", xlab="CaseCount", ylab="Nucleocapsid (N)", main="Plot 1: Weekly New Infection Counts (CaseCount) vs Nucleocapsid (N)")
+grid()
+```
+# Statistical Modelling
+Denote $C_t$ as the COVID-19 case count rate at time $t$, $N_t$ as the SARS-CoV-2 concentrations at time $t$, $PMMoV_t$ as the human fecal marker concentration at time $t$, and $Flow_t$ as the influent flow rate at time $t$. Following the methodology of the original study, we will use Root Mean Square Error (RMSE) to evaluate the performance of each model because it aligns with the scale of the original target, the COVID-19 case count rate. However, instead of using Leave-One-Out Cross-Validation (LOOCV), we will implement 10-fold cross-validation due to its greater time efficiency and suitability for typical statistical studies. To do the cross-validation on the original scale, we will reverse transform via exponentiating to ensure predictions are made based on the original data scale, thus avoiding data leakage. Unlike the original study, which modeled each individual plant separately, this study treated all the data collected in Minnesota as one aggregated dataset. This approach allows for predictions at the population level rather than at the level of individual WWTPs.
+
+Considering the bias-variance trade-off inherent in model selection:
+
+  a) Bias: Bias refers to errors introduced by assuming that the model is too simple. A high-bias model might not capture all the complexities of the data, leading to underfitting.
+  b) Variance: Variance refers to errors introduced by the model being too complex. A high-variance model might fit the training data too closely, capturing noise as if it were a real pattern, leading to overfitting.
+
+We will explore various statistical and machine learning methods to determine if a complex non-linear relationship between case counts and virus concentrations provides a better fit than a simple linear model.
+
+All statistical analyses were performed using R version 4.4.1 (R Core Team, 2024).
+
+# Linear Regression
+Linear regression is a fundamental statistical model that assumes a linear relationship between the predictors and the response. This model is typically characterized by high bias and low variance due to its linearity assumption. Table 1 presents the RMSE for various linear regression models, including those using only lagged 1 predictors and those using both lagged 1 and lagged 2 predictors, across different normalization scenarios: unnormalized, normalized by flow, and normalized by both flow and PMMoV.
+
+From **Table 1**, based on the RMSE values, we observed similar performance between models using lagged 1 predictors and those using both lagged 1 and lagged 2 predictors across all terms. Our analysis indicates that the best model fit is achieved by normalizing only by flow, followed by normalizing by both flow and PMMoV. Normalizing by only PMMoV is next, with the unnormalized model showing the least fit.
+
+Since the inclusion of PMMoV does not improve the model, aligning with findings from the original paper, we conclude that PMMoV should be excluded from future model considerations. Henceforth, all future models will exclude PMMoV.
+```{r}
+# Define formulas with log10 transformations for both independent and dependent variables
+formulas1 <- list(
+  "$\\log_{10}(C_{t}) \\sim \\log_{10}(N_{t-1})$" = log10(CaseCount) ~ log10(N_Lag1),
+  "$\\log_{10}(C_{t}) \\sim \\log_{10}(N_{t-1}) + \\log_{10}(N_{t-2})$" = log10(CaseCount) ~ log10(N_Lag1) + log10(N_Lag2),
+  "$\\log_{10}(C_{t}) \\sim \\log_{10}(N_{t-1} \\cdot Flow_{t-1})$" = log10(CaseCount) ~ log10(I(N_Lag1 * Flow_Lag1)),
+  "$\\log_{10}(C_{t}) \\sim \\log_{10}(N_{t-1} \\cdot Flow_{t-1}) + \\log_{10}(N_{t-2} \\cdot Flow_{t-2})$" = log10(CaseCount) ~ log10(I(N_Lag1 * Flow_Lag1)) + log10(I(N_Lag2 * Flow_Lag2)),
+  "$\\log_{10}(C_{t}) \\sim \\log_{10}(\\frac{N_{t-1}}{PMMoV_{t-1}})$" = log10(CaseCount) ~ log10(I(N_Lag1 / PMMoV_Lag1)),
+  "$\\log_{10}(C_{t}) \\sim \\log_{10}(\\frac{N_{t-1}}{PMMoV_{t-1}}) + \\log_{10}(\\frac{N_{t-2}}{PMMoV_{t-2}})$" = log10(CaseCount) ~ log10(I(N_Lag1 / PMMoV_Lag1)) + log10(I(N_Lag2 / PMMoV_Lag2)),
+  "$\\log_{10}(C_{t}) \\sim \\log_{10}(\\frac{N_{t-1} \\cdot Flow_{t-1}}{PMMoV_{t-1}})$" = log10(CaseCount) ~ log10(I(N_Lag1 * Flow_Lag1 / PMMoV_Lag1)),
+  "$\\log_{10}(C_{t}) \\sim \\log_{10}(\\frac{N_{t-1} \\cdot Flow_{t-1}}{PMMoV_{t-1}}) + \\log_{10}(\\frac{N_{t-2} \\cdot Flow_{t-2}}{PMMoV_{t-2}})$" = log10(CaseCount) ~ log10(I(N_Lag1 * Flow_Lag1 / PMMoV_Lag1)) + log10(I(N_Lag2 * Flow_Lag2 / PMMoV_Lag2))
+)
+
+# Initialize results dataframe
+results <- data.frame(
+  Model = character(),
+  RMSE = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# Function to reverse log10 transformation
+reverse_log10 <- function(x) {
+  return(10^x)
+}
+
+# Fit the models and compute RMSE
+for (name in names(formulas1)) {
+  formula1 <- formulas1[[name]]
+  train_control <- trainControl(method = "cv", number = 10)
+  model <- train(formula1, data = df, method = "lm", trControl = train_control, metric = "RMSE")
+  
+  # Predict on the log10 scale and reverse transform
+  predictions <- predict(model, df)
+  actuals <- log10(df$CaseCount)
+  
+  # Reverse transform
+  predictions_original <- reverse_log10(predictions)
+  actuals_original <- reverse_log10(actuals)
+  
+  # Calculate RMSE on the original scale
+  rmse_original <- sqrt(mean((predictions_original - actuals_original)^2))
+  
+  results <- rbind(results, data.frame(Model = name, RMSE = rmse_original))
+}
+
+# Display results in a table
+results %>%
+  kable(caption = "Linear Regression Model Performance Using RMSE", format = "latex", escape = FALSE) %>%
+  kable_styling(font_size = 12, full_width = FALSE)
+```
+```{r, include=FALSE}
+saved_metrics <- list()
+# Calculate average RMSE
+average_rmse <- mean(results$RMSE)
+# Append the average RMSE to the list
+saved_metrics <- append(saved_metrics, list(average_rmse))
+```
+# Linear Regression with Interaction Effect
+For the best models from Table 1 with the lowest RMSE, we now consider using the interaction term between Flow and SARS-CoV-2 (N) instead of normalizing. In statistical terms, an interaction term means that the effect of one predictor on the response depends on another predictor. Table 2 presents the RMSE for the three models using interaction terms instead of normalization.
+
+From **Table 2**, based on the RMSE values, we observed that models with interaction terms performed better than those with normalization, for both lagged 1 predictors and models using both lagged 1 and lagged 2 predictors. Therefore, we conclude that incorporating interaction terms is superior to normalization. Although models with both lagged 1 and lagged 2 predictors showed slightly better performance than those with only lagged 1 predictors, the increased model complexity prevents us from definitively determining whether using both lagged 1 and lagged 2 predictors is better. For educational purposes, we will continue to model with normalization in all future models.
+```{r}
+# Define formulas with log10 transformations for both independent and dependent variables
+formulas2 <- list(
+  "$\\log_{10}(C_{t}) \\sim \\log_{10}(N_{t-1}) * \\log_{10}(Flow_{t-1})$" = log10(CaseCount) ~ log10(N_Lag1) * log10(Flow_Lag1),
+  "$\\log_{10}(C_{t}) \\sim \\log_{10}(N_{t-1}) * \\log_{10}(Flow_{t-1}) + \\log_{10}(N_{t-2}) * \\log_{10}(Flow_{t-2})$" = log10(CaseCount) ~ log10(N_Lag1) * log10(Flow_Lag1) + log10(N_Lag2) * log10(Flow_Lag2)
+)
+
+# Initialize results dataframe
+results <- data.frame(
+  Model = character(),
+  RMSE = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# Function to reverse log10 transformation
+reverse_log10 <- function(x) {
+  return(10^x)
+}
+
+# Fit the models and compute RMSE for formulas2
+for (name in names(formulas2)) {
+  formula2 <- formulas2[[name]]
+  train_control <- trainControl(method = "cv", number = 10)
+  model <- train(formula2, data = df, method = "lm", trControl = train_control, metric = "RMSE")
+  
+  # Predict on the log10 scale and reverse transform
+  predictions <- predict(model, df)
+  actuals <- df$CaseCount
+  
+  # Reverse transform
+  predictions_original <- reverse_log10(predictions)
+  actuals_original <- actuals
+  
+  # Calculate RMSE on the original scale
+  rmse_original <- sqrt(mean((predictions_original - actuals_original)^2))
+  
+  results <- rbind(results, data.frame(Model = name, RMSE = rmse_original))
+}
+
+# Display results in a table
+results %>%
+  kable(caption = "Linear Regression with Interaction Model Performance Using RMSE", format = "latex", escape = FALSE) %>%
+  kable_styling(font_size = 12, full_width = FALSE)
+```
+```{r, include=FALSE}
+# Calculate average RMSE
+average_rmse <- mean(results$RMSE)
+# Append the average RMSE to the list
+saved_metrics <- append(saved_metrics, list(average_rmse))
+```
+# Regularized Linear Regression Using Ridge Method
+Now, we will try regularized linear regression using Ridge. Ridge is a method that can handle collinearity between predictors by shrinking all correlated predictors' coefficients together. This approach makes sense for our data, as our predictors are very similar to each other (e.g., lagged 1 and lagged 2). Although the correlation between N1 lagged 1 and N1 lagged 2 is only 0.25, we are still interested in understanding how regularization would work.
+
+We use the glmnet package, which begins by specifying a range of lambda values. Next, through 10-fold cross-validation, the algorithm identifies the optimal lambda for each fold, resulting in 10 distinct lambda values. These optimal lambdas are then evaluated on the entire dataset again to select the lambda that minimizes the prediction error. Because fitting models with Ridge for only one predictor is equivalent to fitting ordinary linear regression, we will fit models with both lagged 1 and lagged 2 terms.
+
+From **Table 3**, we see that Ridge performs worse than the linear model with interaction term and hence should not be considered further.
+```{r}
+# Define formulas with log10 transformations for both independent and dependent variables
+formulas3 <- list(
+  "$\\log_{10}(C_{t}) \\sim \\log_{10}(N_{t-1} \\cdot Flow_{t-1}) + \\log_{10}(N_{t-2} \\cdot Flow_{t-2})$" = log10(CaseCount) ~ log10(I(N_Lag1 * Flow_Lag1)) + log10(I(N_Lag2 * Flow_Lag2)),
+  "$\\log_{10}(C_{t}) \\sim \\log_{10}(N_{t-1}) * \\log_{10}(Flow_{t-1}) + \\log_{10}(N_{t-2}) * \\log_{10}(Flow_{t-2})$" = log10(CaseCount) ~ log10(N_Lag1) * log10(Flow_Lag1) + log10(N_Lag2) * log10(Flow_Lag2)
+)
+
+# Initialize results dataframe
+results <- data.frame(
+  Model = character(),
+  RMSE = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# Function to reverse log10 transformation
+reverse_log10 <- function(x) {
+  return(10^x)
+}
+
+# Fit the models and compute RMSE for formulas3
+for (name in names(formulas3)) {
+  formula3 <- formulas3[[name]]
+  model_matrix <- model.matrix(formula3, data = df)[, -1]
+  response <- log10(df$CaseCount)
+  train_control <- trainControl(method = "cv", number = 10)
+  
+  model <- train(
+    x = model_matrix, 
+    y = response, 
+    method = "glmnet", 
+    trControl = train_control, 
+    tuneGrid = expand.grid(alpha = 0, lambda = 10^seq(4, -2, length = 100)), 
+    metric = "RMSE"
+  )
+  
+  # Predict on the log10 scale and reverse transform
+  predictions <- predict(model, model_matrix)
+  actuals <- df$CaseCount
+  
+  # Reverse transform
+  predictions_original <- reverse_log10(predictions)
+  actuals_original <- actuals
+  
+  # Calculate RMSE on the original scale
+  rmse_original <- sqrt(mean((predictions_original - actuals_original)^2))
+  
+  results <- rbind(results, data.frame(Model = name, RMSE = rmse_original))
+}
+
+# Display results in a table
+results %>%
+  kable(caption = "Linear Regression Model Performance with RMSE using Ridge Regression", format = "latex", escape = FALSE) %>%
+  kable_styling(font_size = 12, full_width = FALSE)
+```
+```{r, include=FALSE}
+# Calculate average RMSE
+average_rmse <- mean(results$RMSE)
+# Append the average RMSE to the list
+saved_metrics <- append(saved_metrics, list(average_rmse))
+```
+# Model Diagostic for Linear Model Assumption
+**Plot 2** showcases the residuals vs. fitted plot and normal Q-Q plot for the model with interaction effects, considering both lagged 1 and lagged 2 predictors, note that this is model 2 in **Table 2** without ridge regularized. 
+$$
+\log_{10}(C_t) \sim \log_{10}(N_{t-1}) * \log_{10}(\text{Flow}_{t-1}) + \log_{10}(N_{t-2}) * \log_{10}(\text{Flow}_{t-2})
+$$
+
+## Residuals vs. Fitted Values Plot 
+
+Linearity: This plot helps check if the relationship between the predictors and the response is linear. Ideally, the residuals should be randomly scattered around the horizontal line (y = 0) without any discernible pattern. From the plot, it appears there is no clear pattern, indicating that the linearity assumption is reasonably met.
+
+Homoscedasticity: This refers to the constant variance of the residuals. The residuals should form a horizontal band around the centerline (y = 0) with constant spread. The spread of the residuals seems fairly constant, though there might be slight funneling on the right side. This suggests that homoscedasticity is mostly met, but there may be some minor issues.
+
+## Q-Q Plot of Residuals
+
+Normality of Residuals: The Q-Q plot assesses if the residuals follow a normal distribution. The points should lie along the 45-degree reference line. The Q-Q plot shows that most points lie along the reference line, indicating that the residuals are approximately normally distributed. There are some deviations at the tails, which are common in real data but should be checked for potential outliers or heavy-tailed distribution.
+
+- Linearity: Assumption appears to be met.
+- Homoscedasticity: Mostly met with some minor issues.
+- Normality: Mostly met with some deviations at the tails.
+
+Overall, the linear model assumptions are reasonably satisfied. Moving forward, we will consider some nonlinear modeling techniques to compare their performance with the linear model.
+```{r, fig.width = 10, fig.height = 10}
+# Fit the linear model
+model <- lm(log10(CaseCount) ~ log10(N_Lag1) * log10(Flow_Lag1) + log10(N_Lag2) * log10(Flow_Lag2), data = df)
+
+# Plot only the first two model diagnostics
+par(mfrow = c(2, 1))  # Arrange the plots in a 1x2 grid
+
+# Plot the first diagnostic plot (Residuals vs Fitted)
+plot(model, which = 1, main = "Plot 2a: Residuals vs Fitted")
+
+# Plot the second diagnostic plot (Normal Q-Q)
+plot(model, which = 2, main = "Plot 2b: Normal Q-Q")
+```
+# Generalized Additive Model
+We now considered some nonlinear modeling with Generalized Additive Models (GAMs). Although GAMs are still parametric, they allow us to fit smooth functions between predictors and the response, effectively modeling nonlinearity. We use the mgcv package, which automates the process of finding the best model fit in each of the 10 folds. This includes automatically selecting or optimizing smoothing parameters (such as degrees of freedom or lambda values) using techniques like Generalized Cross Validation (GCV) or Restricted Maximum Likelihood (REML). The package computes errors and averages these errors across folds to provide a final evaluation.
+
+From **Table 4**, we observe that GAMs with interaction terms perform the best so far, indicating that nonlinear modeling may fit the data better. Interestingly, interaction terms work better than normalization for GAMs, which is surprising because the complexity of the GAM model is often not well-suited for capturing interactions effectively. While it is possible to write out the equation for GAMs since they are parametric models, we have omitted it here due to its complexity and because later models provide better performance.
+```{r}
+# Define formulas with log10 transformations for both independent and dependent variables
+formulas4 <- list(
+  "$\\log_{10}(C_{t}) \\sim s(\\log_{10}(N_{t-1}), by = \\log_{10}(Flow_{t-1}))$" = log10(CaseCount) ~ s(log10(N_Lag1), by = log10(Flow_Lag1)),
+  "$\\log_{10}(C_{t}) \\sim s(\\log_{10}(N_{t-1}), by = \\log_{10}(Flow_{t-1})) + s(\\log_{10}(N_{t-2}), by = \\log_{10}(Flow_{t-2}))$" = log10(CaseCount) ~ s(log10(N_Lag1), by = log10(Flow_Lag1)) + s(log10(N_Lag2), by = log10(Flow_Lag2)),
+  "$\\log_{10}(C_{t}) \\sim s(\\log_{10}(N_{t-1} \\cdot Flow_{t-1}))$" = log10(CaseCount) ~ s(log10(N_Lag1 * Flow_Lag1)),
+  "$\\log_{10}(C_{t}) \\sim s(\\log_{10}(N_{t-1} \\cdot Flow_{t-1})) + s(\\log_{10}(N_{t-2} \\cdot Flow_{t-2}))$" = log10(CaseCount) ~ s(log10(N_Lag1 * Flow_Lag1)) + s(log10(N_Lag2 * Flow_Lag2))
+)
+
+# Initialize results dataframe
+results <- data.frame(
+  Model = character(),
+  RMSE = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# Function to reverse log10 transformation
+reverse_log10 <- function(x) {
+  return(10^x)
+}
+
+# Fit the GAMs and compute RMSE
+for (name in names(formulas4)) {
+  formula4 <- formulas4[[name]]
+  model <- gam(formula4, data = df)
+  predictions <- predict(model, newdata = df)
+  actuals <- df$CaseCount
+  
+  # Reverse transform
+  predictions_original <- reverse_log10(predictions)
+  actuals_original <- actuals
+  
+  # Calculate RMSE on the original scale
+  rmse_original <- sqrt(mean((predictions_original - actuals_original)^2))
+  
+  results <- rbind(results, data.frame(Model = name, RMSE = rmse_original))
+}
+
+# Display results in a table
+results %>%
+  kable(caption = "GAM Model Performance Using RMSE", format = "latex", escape = FALSE) %>%
+  kable_styling(font_size = 12, full_width = FALSE)
+```
+```{r, include=FALSE}
+# Calculate average RMSE
+average_rmse <- mean(results$RMSE)
+# Append the average RMSE to the list
+saved_metrics <- append(saved_metrics, list(average_rmse))
+```
+# Decision Tree Regression
+Now, we will move on to machine learning models that cover nonlinear modeling. We'll start with basic tree-based methods, specifically the decision tree. Although decision trees are commonly used for classification, they can also be applied to regression, where predictions are based on the mean of the data in the split regions.
+
+There are several hyperparameters for tuning a decision tree, such as:
+
+- Maximum Depth: The maximum depth of the tree.
+- Minimum Samples Split: The minimum number of samples required to split an internal node.
+- Minimum Samples Leaf: The minimum number of samples required to be at a leaf node.
+
+From **Table 5**, we see that the decision tree performs worse than the previous models and, therefore, should not be considered further. Therefore we doesn't bother with the hyperparameter selected by caret package with optimized the tree for best result.
+```{r}
+# Define formulas with log10 transformations for both independent and dependent variables
+formulas5 <- list(
+  "$\\log_{10}(C_{t}) \\sim \\log_{10}(N_{t-1} \\cdot Flow_{t-1})$" = log10(CaseCount) ~ log10(I(N_Lag1 * Flow_Lag1)),
+  "$\\log_{10}(C_{t}) \\sim \\log_{10}(N_{t-1} \\cdot Flow_{t-1}) + \\log_{10}(N_{t-2} \\cdot Flow_{t-2})$" = log10(CaseCount) ~ log10(I(N_Lag1 * Flow_Lag1)) + log10(I(N_Lag2 * Flow_Lag2)),
+  "$\\log_{10}(C_{t}) \\sim \\log_{10}(N_{t-1}) * \\log_{10}(Flow_{t-1})$" = log10(CaseCount) ~ log10(N_Lag1) * log10(Flow_Lag1),
+  "$\\log_{10}(C_{t}) \\sim \\log_{10}(N_{t-1}) * \\log_{10}(Flow_{t-1}) + \\log_{10}(N_{t-2}) * \\log_{10}(Flow_{t-2})$" = log10(CaseCount) ~ log10(N_Lag1) * log10(Flow_Lag1) + log10(N_Lag2) * log10(Flow_Lag2)
+)
+
+# Initialize results dataframe
+results <- data.frame(
+  Model = character(),
+  RMSE = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# Function to reverse log10 transformation
+reverse_log10 <- function(x) {
+  return(10^x)
+}
+
+# Fit the models and compute RMSE using Decision Tree Regression
+for (name in names(formulas5)) {
+  formula5 <- formulas5[[name]]
+  train_control <- trainControl(method = "cv", number = 10)
+  model <- train(formula5, data = df, method = "rpart", trControl = train_control, metric = "RMSE")
+  
+  # Predict on the log10 scale and reverse transform
+  predictions <- predict(model, df)
+  actuals <- df$CaseCount
+  
+  # Reverse transform
+  predictions_original <- reverse_log10(predictions)
+  actuals_original <- actuals
+  
+  # Calculate RMSE on the original scale
+  rmse_original <- sqrt(mean((predictions_original - actuals_original)^2))
+  
+  results <- rbind(results, data.frame(Model = name, RMSE = rmse_original))
+}
+
+# Display results in a table
+results %>%
+  kable(caption = "Decision Tree Regression Model Performance Using RMSE", format = "latex", escape = FALSE) %>%
+  kable_styling(font_size = 12, full_width = FALSE)
+```
+```{r, include=FALSE}
+# Calculate average RMSE
+average_rmse <- mean(results$RMSE)
+# Append the average RMSE to the list
+saved_metrics <- append(saved_metrics, list(average_rmse))
+```
+# Gradient Boosting Regression 
+Gradient Boosting Regression is a boosting and ensemble method, which means training many weak models that learn from previous mistakes to form a strong model. In our case, we will use decision trees as the weak models. 
+
+The following are explanations of the hyperparameters for Gradient Boosting according to the caret package:
+
+- n.trees (or n_estimators): This parameter determines the number of trees to be built in the model. Each tree is built sequentially to correct the errors of the previous trees.
+- interaction.depth (or max_depth): This parameter controls the maximum depth of each tree. It limits the number of splits in each tree, thus controlling the model's complexity.
+- shrinkage (or learning_rate): This parameter controls the contribution of each tree to the final model. A lower learning rate means the model learns slowly but can result in better generalization by making finer adjustments.
+- n.minobsinnode (or min_samples_split / min_child_weight): This parameter sets the minimum number of observations that must be present in a node for it to be split. It prevents the model from learning overly specific patterns (overfitting) by ensuring that each split is based on enough data.
+
+It's important to note how the package 'caret' fine-tunes hyperparameters for both GBMs and KNN. Let's take KNN as an example:
+
+The data is divided into 10 folds, various k values are tried for each fold, performance metrics (e.g., RMSE) are calculated and averaged across all folds for each k value, and the k with the lowest average RMSE is selected to train the final model on the entire dataset. For GBMs, since it has multiple hyperparameters, a combination of hyperparameter values is used. 
+
+From **Table 6**, we observe that Gradient Boosting Regression surpassed the previous model when using interaction terms instead of normalization. This model preferred incorporating both lagged 1 and lagged 2 predictors, as demonstrated by the variable importance plot. The plot assigns higher importance to lagged 1 predictors compared to lagged 2 predictors, indicating that lagged 1 predictors significantly reduce the average error more than lagged 2 predictors.
+```{r}
+# Define formulas with log10 transformations for both independent and dependent variables
+formulas7 <- list(
+  "$\\log_{10}(C_{t}) \\sim \\log_{10}(N_{t-1} \\cdot Flow_{t-1})$" = log10(CaseCount) ~ log10(I(N_Lag1 * Flow_Lag1)),
+  "$\\log_{10}(C_{t}) \\sim \\log_{10}(N_{t-1} \\cdot Flow_{t-1}) + \\log_{10}(N_{t-2} \\cdot Flow_{t-2})$" = log10(CaseCount) ~ log10(I(N_Lag1 * Flow_Lag1)) + log10(I(N_Lag2 * Flow_Lag2)),
+  "$\\log_{10}(C_{t}) \\sim \\log_{10}(N_{t-1}) * \\log_{10}(Flow_{t-1})$" = log10(CaseCount) ~ log10(N_Lag1) * log10(Flow_Lag1),
+  "$\\log_{10}(C_{t}) \\sim \\log_{10}(N_{t-1}) * \\log_{10}(Flow_{t-1}) + \\log_{10}(N_{t-2}) * \\log_{10}(Flow_{t-2})$" = log10(CaseCount) ~ log10(N_Lag1) * log10(Flow_Lag1) + log10(N_Lag2) * log10(Flow_Lag2)
+)
+
+# Initialize results dataframe
+results <- data.frame(
+  Model = character(),
+  RMSE = numeric(),
+  BestHyperparameters = character(),
+  stringsAsFactors = FALSE
+)
+
+# Initialize a list to store models
+models <- list()
+
+# Function to reverse log10 transformation
+reverse_log10 <- function(x) {
+  return(10^x)
+}
+
+# Fit the models and compute RMSE using GBM
+for (name in names(formulas7)) {
+  formula7 <- formulas7[[name]]
+  train_control <- trainControl(method = "cv", number = 10)
+  model <- train(formula7, data = df, method = "gbm", trControl = train_control, metric = "RMSE", verbose = FALSE)
+  
+  # Predict on the log10 scale and reverse transform
+  predictions <- predict(model, df)
+  actuals <- df$CaseCount
+  
+  # Reverse transform
+  predictions_original <- reverse_log10(predictions)
+  actuals_original <- actuals
+  
+  # Calculate RMSE on the original scale
+  rmse_original <- sqrt(mean((predictions_original - actuals_original)^2))
+  
+  # Extract the best hyperparameters
+  best_hyperparameters <- paste(names(model$bestTune), model$bestTune, sep = "=", collapse = ", ")
+  
+  results <- rbind(results, data.frame(Model = name, RMSE = rmse_original, BestHyperparameters = best_hyperparameters))
+  
+  # Store the models for later use
+  models[[name]] <- model
+}
+
+# Display results in a table
+results %>%
+  kable(caption = "GBM Model Performance Using RMSE", format = "latex", escape = FALSE) %>%
+  kable_styling(font_size = 12, full_width = TRUE)
+
+# Extract variable importance for the fourth model
+fourth_model_name <- "$\\log_{10}(C_{t}) \\sim \\log_{10}(N_{t-1}) * \\log_{10}(Flow_{t-1}) + \\log_{10}(N_{t-2}) * \\log_{10}(Flow_{t-2})$"
+if (fourth_model_name %in% names(models)) {
+  fourth_model <- models[[fourth_model_name]]
+  var_importance <- varImp(fourth_model, scale = FALSE)
+  
+  # Convert variable importance to a dataframe
+  var_importance_df <- as.data.frame(var_importance$importance)
+  var_importance_df <- var_importance_df %>%
+    rownames_to_column(var = "Variable") %>%
+    arrange(desc(Overall))
+  
+  # Calculate the total importance to normalize
+  total_importance <- sum(var_importance_df$Overall)
+  
+  # Convert to percentage
+  var_importance_df$Percentage <- (var_importance_df$Overall / total_importance) * 100
+
+  # Plot variable importance as percentages with labels
+  ggplot(var_importance_df, aes(x = reorder(Variable, Percentage), y = Percentage)) +
+    geom_bar(stat = "identity", fill = "steelblue") +
+    geom_text(aes(label = sprintf("%.1f%%", Percentage)), position = position_dodge(width = 0.9), vjust = -0.5) +
+    coord_flip() +
+    xlab("Variable") +
+    ylab("Importance (%)") +
+    ggtitle("Variable Importance (Percentage) for Fourth Model") +
+    theme_minimal()
+} else {
+  stop("The fourth model is not found in the models list.")
+}
+```
+```{r, include=FALSE}
+# Calculate average RMSE
+average_rmse <- mean(results$RMSE)
+# Append the average RMSE to the list
+saved_metrics <- append(saved_metrics, list(average_rmse))
+```
+# K-Nearest Neighbours Regression 
+For the final machine learning model, we employed K-Nearest Neighbors (KNN). KNN sets decision boundaries based on the majority of nearby data points. In K-Nearest Neighbors Regression, predictions are made by averaging the values of the nearby data points. The primary advantage of KNN is that it has only one hyperparameter, k, which represents the number of nearby data points considered.
+
+From Table 7, we see that K-Nearest Neighbors performed the best of all models when using the interaction term over normalization terms. The results between using only lagged 1 and both lagged 1 and lagged 2 predictors are very close. With supporting evidence from previous variable importance plots from GBMs and the preference for simpler models in machine learning, we conclude that using only lagged 1 predictors is sufficient. The models suggested using 9 nearest neighbors as the k hyperparameter.
+
+```{r}
+# Define formulas with log10 transformations for both independent and dependent variables
+formulas6 <- list(
+  "$\\log_{10}(C_{t}) \\sim \\log_{10}(N_{t-1} \\cdot Flow_{t-1})$" = log10(CaseCount) ~ log10(I(N_Lag1 * Flow_Lag1)),
+  "$\\log_{10}(C_{t}) \\sim \\log_{10}(N_{t-1} \\cdot Flow_{t-1}) + \\log_{10}(N_{t-2} \\cdot Flow_{t-2})$" = log10(CaseCount) ~ log10(I(N_Lag1 * Flow_Lag1)) + log10(I(N_Lag2 * Flow_Lag2)),
+  "$\\log_{10}(C_{t}) \\sim \\log_{10}(N_{t-1}) * \\log_{10}(Flow_{t-1})$" = log10(CaseCount) ~ log10(N_Lag1) * log10(Flow_Lag1),
+  "$\\log_{10}(C_{t}) \\sim \\log_{10}(N_{t-1}) * \\log_{10}(Flow_{t-1}) + \\log_{10}(N_{t-2}) * \\log_{10}(Flow_{t-2})$" = log10(CaseCount) ~ log10(N_Lag1) * log10(Flow_Lag1) + log10(N_Lag2) * log10(Flow_Lag2)
+)
+
+# Initialize results dataframe
+results <- data.frame(
+  Model = character(),
+  RMSE = numeric(),
+  K = numeric(),  # Add column for the chosen K
+  stringsAsFactors = FALSE
+)
+
+# Function to reverse log10 transformation
+reverse_log10 <- function(x) {
+  return(10^x)
+}
+
+# Fit the models and compute RMSE using KNN Regression
+for (name in names(formulas6)) {
+  formula6 <- formulas6[[name]]
+  train_control <- trainControl(method = "cv", number = 10)
+  model <- train(formula6, data = df, method = "knn", trControl = train_control, metric = "RMSE")
+  
+  # Predict on the log10 scale and reverse transform
+  predictions <- predict(model, df)
+  actuals <- df$CaseCount
+  
+  # Reverse transform
+  predictions_original <- reverse_log10(predictions)
+  actuals_original <- actuals
+  
+  # Calculate RMSE on the original scale
+  rmse_original <- sqrt(mean((predictions_original - actuals_original)^2))
+  
+  # Extract the best K value
+  best_k <- model$bestTune$k
+  
+  results <- rbind(results, data.frame(Model = name, RMSE = rmse_original, K = best_k))
+}
+
+# Display results in a table
+results %>%
+  kable(caption = "KNN Regression Model Performance Using RMSE", format = "latex", escape = FALSE) %>%
+  kable_styling(font_size = 12, full_width = FALSE)
+```
+```{r, include=FALSE}
+# Calculate average RMSE
+average_rmse <- mean(results$RMSE)
+# Append the average RMSE to the list
+saved_metrics <- append(saved_metrics, list(average_rmse))
+```
+# Average RMSE for All Models of each Algorithm
+**Table 8** shows the average RMSE of all models for each algorithm. We also have evidence that K-Nearest Neighbors Regression has the lowest average error regardless of the models being fit. Hence, we can conclude that KNN is more stable compared to the other models.
+```{r}
+# Create the data frame with the manual entries
+data <- data.frame(
+  Algorithm = c("Linear Regression", "Linear Regression with Interaction", "Ridge Regression", "Generalized Additive Model", "Decision Tree Regression", "Gradient Boosting Regression", "KNN Regression"),
+  Average = unlist(saved_metrics)
+)
+
+# Create and display the table
+kable(data, caption = "Average RMSE for Each Algorithm", format = "markdown")
+```
+# Conclusion
+Our analysis revealed several key findings:
+
+- Best Models: K-Nearest Neighbors Regression (KNN) with 9 nearest neighbors consistently achieved the lowest prediction error and demonstrated robustness, especially when using interaction terms.
+- Exclusion of PMMoV: Excluding PMMoV from the models improved performance.
+- Normalization vs. Interaction for Flow: Models normalized by flow performed better than unnormalized models. Interaction terms were found to be more effective than normalization.
+- Lagged Data: Lagged 1 predictors were sufficient than using both lagged 1 and lagged 2 predictors.
+- Linearity: Linear model assumption met
+
+Based on these findings, we selected KNN with k=9 as the ideal model for predicting COVID-19 case counts. 
+
+The hyperparameters balance complexity and generalization, ensuring effective learning without overfitting. This study highlights the value of advanced regression techniques and machine learning models, particularly KNN, for wastewater surveillance data. It should be noted that one of the model assumptions of KNN is the even scale of variables, which is met in our study since we only used a single variable. Proper data processing should be applied if other variables are study along with RNA concentration.
+
+Future research should focus on integrating additional data sources and refining models to enhance predictive accuracy and robustness, supporting wastewater-based epidemiology as an early warning system for infectious disease outbreaks.
+
+# References
